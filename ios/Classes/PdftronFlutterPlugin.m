@@ -1957,18 +1957,25 @@
     
     PTAnnotationManager * const annotationManager = documentController.toolManager.annotationManager;
     
-    NSError *updateError = nil;
-    const BOOL updateSuccess = [self updateAnnotationsWithXFDFString:xfdf
-                                                               error:&updateError
-                                                   annotationManager:annotationManager];
-    if (!updateSuccess) {
-        if (updateError) {
-            NSLog(@"Error: There was an error while trying to import annotation command. %@", updateError.localizedDescription);
-        }
-        flutterResult([FlutterError errorWithCode:@"import_annotation_command" message:@"Failed to import annotation command" details:@"Error: There was an error while trying to import annotation command."]);
-    } else {
-        flutterResult(nil);
-    }
+    // Run heavy annotation import on a background queue to avoid freezing the UI.
+    // The XFDF parsing is the heaviest operation and does not require document access.
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSError *updateError = nil;
+        const BOOL updateSuccess = [self updateAnnotationsWithXFDFString:xfdf
+                                                                   error:&updateError
+                                                       annotationManager:annotationManager];
+        // Return result on the main thread (Flutter requirement)
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!updateSuccess) {
+                if (updateError) {
+                    NSLog(@"Error: There was an error while trying to import annotation command. %@", updateError.localizedDescription);
+                }
+                flutterResult([FlutterError errorWithCode:@"import_annotation_command" message:@"Failed to import annotation command" details:@"Error: There was an error while trying to import annotation command."]);
+            } else {
+                flutterResult(nil);
+            }
+        });
+    });
 }
 
 - (BOOL)updateAnnotationsWithXFDFString:(NSString *)xfdfString
@@ -1980,25 +1987,26 @@
         return NO;
     }
     
+    // Step 1: Parse XFDF into FDFDoc WITHOUT holding any lock.
+    // This is the heaviest CPU operation and does not require document access.
+    PTFDFDoc * const fdfDoc = [PTFDFDoc CreateFromXFDF:xfdfString];
+    if (!fdfDoc) {
+        return NO;
+    }
+    
     [annotationManager willUpdateAnnotationsWithXFDFString:xfdfString];
     
+    // Step 2: Acquire write lock and apply changes (shorter lock hold time).
     NSError *writeError = nil;
     const BOOL writeSuccess = [pdfViewCtrl DocLock:YES
                                          withBlock:^(PTPDFDoc * _Nullable doc) {
         
-        PTFDFDoc * const fdfDoc = [PTFDFDoc CreateFromXFDF:xfdfString];
-        if (!fdfDoc) {
-            return;
-        }
-        
         [doc FDFUpdate:fdfDoc];
         
-        // Allow non-standard annotation rotations.
         PTRefreshOptions * const refreshOptions = [[PTRefreshOptions alloc] init];
         [refreshOptions SetUseNonStandardRotation:YES];
-        
         [doc RefreshAnnotAppearances:refreshOptions];
-        
+
         [pdfViewCtrl Update:YES];
     } error:&writeError];
     if (!writeSuccess) {
@@ -2013,6 +2021,7 @@
     
     return YES;
 }
+
 
 - (void)exportAnnotations:(NSString *)annotationList resultToken:(FlutterResult)flutterResult
 {
