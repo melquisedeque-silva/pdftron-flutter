@@ -12,6 +12,8 @@ import android.view.Menu;
 import android.view.MenuItem;
 
 import androidx.annotation.NonNull;
+import android.os.Handler;
+import android.os.Looper;
 import androidx.annotation.Nullable;
 
 import com.pdftron.common.PDFNetException;
@@ -2874,8 +2876,8 @@ public class PluginUtils {
     }
 
     private static void importAnnotations(String xfdf, boolean replace, MethodChannel.Result result, ViewerComponent component) throws PDFNetException {
-        PDFViewCtrl pdfViewCtrl = component.getPdfViewCtrl();
-        PDFDoc pdfDoc = component.getPdfDoc();
+        final PDFViewCtrl pdfViewCtrl = component.getPdfViewCtrl();
+        final PDFDoc pdfDoc = component.getPdfDoc();
         if (null == pdfViewCtrl || null == pdfDoc || null == xfdf) {
             result.error("InvalidState", "Activity not attached", null);
             return;
@@ -2886,7 +2888,6 @@ public class PluginUtils {
             shouldUnlockRead = true;
 
             if (pdfDoc.hasDownloader()) {
-                // still downloading file, let's wait for next call
                 result.error("InvalidState", "Document download in progress, try again later", null);
                 return;
             }
@@ -2896,27 +2897,53 @@ public class PluginUtils {
             }
         }
 
-        boolean shouldUnlock = false;
-        try {
-            pdfViewCtrl.docLock(true);
-            shouldUnlock = true;
+        // Run heavy annotation import on a background thread to avoid ANR.
+        // PDFTron's docLock is thread-safe and supports multi-threaded access.
+        final Handler mainHandler = new Handler(Looper.getMainLooper());
+        new Thread(() -> {
+            boolean shouldUnlock = false;
+            try {
+                // Acquire write lock (cancels rendering for faster acquisition)
+                pdfViewCtrl.docLock(true);
+                shouldUnlock = true;
 
-            FDFDoc fdfDoc = FDFDoc.createFromXFDF(xfdf);
+                // Heavy operations now run off the UI thread:
+                // 1. Parse XFDF string into FDFDoc
+                FDFDoc fdfDoc = FDFDoc.createFromXFDF(xfdf);
 
-            if (replace) {
-                pdfDoc.fdfUpdate(fdfDoc);
-            } else {
-                pdfDoc.fdfMerge(fdfDoc);
-            }
-            pdfDoc.refreshAnnotAppearances();
-            pdfViewCtrl.update(true);
+                // 2. Merge/update annotations into the PDF document
+                if (replace) {
+                    pdfDoc.fdfUpdate(fdfDoc);
+                } else {
+                    pdfDoc.fdfMerge(fdfDoc);
+                }
 
-            result.success(null);
-        } finally {
-            if (shouldUnlock) {
+                // 3. Regenerate visual appearance for all annotations
+                pdfDoc.refreshAnnotAppearances();
+
+                // 4. Trigger view refresh while still holding the lock.
+                // update() internally posts rendering work to PDFViewCtrl's
+                // rendering thread, so it is safe to call from any thread
+                // as long as the document lock is held.
+                pdfViewCtrl.update(true);
+
+                // Now release the lock
                 pdfViewCtrl.docUnlock();
+                shouldUnlock = false;
+
+                // Signal success back on the UI thread (Flutter requirement)
+                mainHandler.post(() -> result.success(null));
+            } catch (Exception e) {
+                final String errorMessage = e.getMessage();
+                mainHandler.post(() -> {
+                    result.error("ImportError", "Failed to import annotations: " + errorMessage, null);
+                });
+            } finally {
+                if (shouldUnlock) {
+                    pdfViewCtrl.docUnlock();
+                }
             }
-        }
+        }, "PDFTron-AnnotImport").start();
     }
 
     private static void exportAnnotations(String annotationList, MethodChannel.Result result, ViewerComponent component) throws PDFNetException, JSONException {
