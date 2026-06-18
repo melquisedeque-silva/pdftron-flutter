@@ -4,12 +4,32 @@ import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pdftron_flutter/pdftron_flutter.dart';
-// If you are using local files, add the permission_handler
-// dependency to pubspec.yaml and uncomment the line below.
-// import 'package:permission_handler/permission_handler.dart';
 
-//set this value to view document via Widget
-var enableWidget = true;
+/// ============================================================
+/// REPRODUCTION SAMPLE: Binary Annotation ID Encoding Mismatch
+/// ============================================================
+///
+/// This sample demonstrates a bug in pdftron_flutter where the
+/// annotation IDs exported during creation (<add> section) have
+/// different encoding than the IDs exported during deletion
+/// (<delete> section).
+///
+/// STEPS TO REPRODUCE:
+/// 1. Run this app on any device
+/// 2. Draw an ink annotation on the PDF
+/// 3. Observe the console log showing the 'name' attribute from <add>
+/// 4. Delete that annotation (tap it, then tap delete)
+/// 5. Observe the console log showing the <id> from <delete>
+/// 6. Compare the two: they may differ due to control character encoding
+///    (e.g., raw \r vs &#13;, raw \t vs &#9;)
+///
+/// EXPECTED: The ID in <delete> should exactly match the 'name' in <add>
+/// ACTUAL: Control characters in the ID are encoded differently between
+///         add and delete operations, making string comparison fail.
+///
+/// This prevents backends from correlating create/delete operations
+/// using the annotation ID as a key.
+/// ============================================================
 
 void main() => runApp(MyApp());
 
@@ -28,213 +48,199 @@ class Viewer extends StatefulWidget {
 }
 
 class _ViewerState extends State<Viewer> {
-  String _version = 'Unknown';
   String _document =
       "https://pdftron.s3.amazonaws.com/downloads/pl/PDFTRON_mobile_about.pdf";
-  bool _showViewer = true;
+
+  /// Stores annotation IDs captured from <add> operations.
+  /// Key: the raw 'name' attribute value from the XFDF <add> section.
+  final Map<String, String> _createdAnnotationIds = {};
 
   @override
   void initState() {
     super.initState();
     initPlatformState();
-    if (!enableWidget) {
-      showViewer();
-    }
-
-    // If you are using local files:
-    // * Remove the above line `showViewer();`.
-    // * Change the _document field to your local filepath.
-    // * Uncomment the section below, including launchWithPermission().
-    // if (Platform.isIOS) {
-    // showViewer(); // Permission not required for iOS.
-    // } else {
-    // launchWithPermission(); // Permission required for Android.
-    // }
   }
 
-  // Uncomment this if you are using local files:
-  // Future<void> launchWithPermission() async {
-  //  PermissionStatus permission = await Permission.storage.request();
-  //  if (permission.isGranted) {
-  //    showViewer();
-  //  }
-  // }
-
-  // Platform messages are asynchronous, so initialize in an async method.
   Future<void> initPlatformState() async {
-    String version;
-    // Platform messages may fail, so use a try/catch PlatformException.
     try {
-      // Initializes the PDFTron SDK, it must be called before you can use
-      // any functionality.
       PdftronFlutter.initialize("your_pdftron_license_key");
-
-      version = await PdftronFlutter.version;
-    } on PlatformException {
-      version = 'Failed to get platform version.';
-    }
-
-    // If the widget was removed from the tree while the asynchronous platform
-    // message was in flight, you want to discard the reply rather than calling
-    // setState to update our non-existent appearance.
-    if (!mounted) return;
-
-    setState(() {
-      _version = version;
-    });
-  }
-
-  void showViewer() async {
-    // Opening without a config file will have all functionality enabled.
-    // await PdftronFlutter.openDocument(_document);
-
-    var config = Config();
-    // How to disable functionality:
-    //      config.disabledElements = [Buttons.shareButton, Buttons.searchButton];
-    //      config.disabledTools = [Tools.annotationCreateLine, Tools.annotationCreateRectangle];
-    // Other viewer configurations:
-    //      config.multiTabEnabled = true;
-    //      config.customHeaders = {'headerName': 'headerValue'};
-
-    // An event listener for document loading
-    var documentLoadedCancel = startDocumentLoadedListener((filePath) {
-      print("document loaded: $filePath");
-    });
-
-    await PdftronFlutter.openDocument(_document, config: config);
-
-    try {
-      // The imported command is in XFDF format and tells whether to add,
-      // modify or delete annotations in the current document.
-      PdftronFlutter.importAnnotationCommand(
-          "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
-              "    <xfdf xmlns=\"http://ns.adobe.com/xfdf/\" xml:space=\"preserve\">\n" +
-              "      <add>\n" +
-              "        <square style=\"solid\" width=\"5\" color=\"#E44234\" opacity=\"1\" creationdate=\"D:20200619203211Z\" flags=\"print\" date=\"D:20200619203211Z\" name=\"c684da06-12d2-4ccd-9361-0a1bf2e089e3\" page=\"1\" rect=\"113.312,277.056,235.43,350.173\" title=\"\" />\n" +
-              "      </add>\n" +
-              "      <modify />\n" +
-              "      <delete />\n" +
-              "      <pdf-info import-version=\"3\" version=\"2\" xmlns=\"http://www.pdftron.com/pdfinfo\" />\n" +
-              "    </xfdf>");
     } on PlatformException catch (e) {
-      print("Failed to importAnnotationCommand '${e.message}'.");
+      print("Failed to initialize PDFTron: ${e.message}");
     }
-
-    try {
-      PdftronFlutter.importBookmarkJson('{"0":"Page 1"}');
-    } on PlatformException catch (e) {
-      print("Failed to importBookmarkJson '${e.message}'.");
-    }
-
-    // An event listener for when local annotation changes are committed
-    // to the document. xfdfCommand is the XFDF Command of the annotation
-    // that was last changed.
-    var annotCancel = startExportAnnotationCommandListener((xfdfCommand) {
-      // Local annotation changed.
-      // Upload XFDF command to server here.
-      String command = xfdfCommand;
-      // Dart limits how many characters are printed onto the console.
-      // The code below ensures that all of the XFDF command is printed.
-      if (command.length > 1024) {
-        print("flutter xfdfCommand:\n");
-        int start = 0;
-        int end = 1023;
-        while (end < command.length) {
-          print(command.substring(start, end) + "\n");
-          start += 1024;
-          end += 1024;
-        }
-        print(command.substring(start));
-      } else {
-        print(command);
-      }
-    });
-
-    // An event listener for when local bookmark changes are committed to
-    // the document. bookmarkJson is the JSON string containing all the
-    // bookmarks that exist when the change was made.
-    var bookmarkCancel = startExportBookmarkListener((bookmarkJson) {
-      print("flutter bookmark: $bookmarkJson");
-    });
-
-    var path = await PdftronFlutter.saveDocument();
-    print("flutter save: $path");
-
-    // To cancel event:
-    // annotCancel();
-    // bookmarkCancel();
-    // documentLoadedCancel();
   }
 
   @override
   Widget build(BuildContext context) {
-    Widget documentChild = Container();
-
-    if (enableWidget) {
-      // If using Android Widget, uncomment one of the following:
-      // If using Flutter v2.3.0-17.0.pre or earlier.
-      // SystemChrome.setEnabledSystemUIOverlays(SystemUiOverlay.values);
-      // If using later Flutter versions.
-      SystemChrome.setEnabledSystemUIMode(
-        SystemUiMode.edgeToEdge,
-      );
-      documentChild = _showViewer
-          ? SafeArea(
-              child: DocumentView(
-              onCreated: _onDocumentViewCreated,
-            ))
-          : Container();
-    }
-
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     return Scaffold(
-      body: Container(
-        width: double.infinity,
-        height: double.infinity,
-        child: documentChild,
+      appBar: AppBar(
+        title: Text('Binary ID Bug Reproduction'),
+      ),
+      body: SafeArea(
+        child: DocumentView(
+          onCreated: _onDocumentViewCreated,
+        ),
       ),
     );
   }
 
-  // This function is used to control the DocumentView widget after it
-  // has been created. The widget will not work without a void
-  // Function(DocumentViewController controller) being passed to it.
   void _onDocumentViewCreated(DocumentViewController controller) async {
-    Config config = new Config();
-
-    var leadingNavCancel = startLeadingNavButtonPressedListener(() {
-      // Uncomment this to quit viewer when leading navigation button is pressed:
-      // this.setState(() {
-      //   _showViewer = !_showViewer;
-      // });
-
-      // Show a dialog when leading navigation button is pressed.
-      _showMyDialog();
-    });
+    Config config = Config();
+    config.annotationToolbars = [
+      DefaultToolbars.annotate,
+      DefaultToolbars.draw,
+    ];
 
     await controller.openDocument(_document, config: config);
+
+    // Listen for annotation changes (create, modify, delete)
+    startExportAnnotationCommandListener((xfdfCommand) {
+      _analyzeXfdfCommand(xfdfCommand);
+    });
   }
 
-  Future<void> _showMyDialog() async {
-    print('hello');
-    return showDialog<void>(
-      context: context,
-      barrierDismissible: false, // User must tap button!
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: Text('AlertDialog'),
-          content: SingleChildScrollView(
-            child: Text('Leading navigation button has been pressed.'),
-          ),
-          actions: <Widget>[
-            TextButton(
-              child: Text('OK'),
-              onPressed: () {
-                Navigator.of(context).pop();
-              },
-            ),
-          ],
-        );
-      },
+  /// Analyzes the XFDF command to detect ID encoding mismatches.
+  void _analyzeXfdfCommand(dynamic xfdfCommand) {
+    if (xfdfCommand is! String) return;
+    final xfdf = xfdfCommand;
+
+    print('\n${'=' * 60}');
+    print('XFDF COMMAND RECEIVED');
+    print('=' * 60);
+
+    // Extract IDs from <add> section (name="..." attributes)
+    final addNameRegex = RegExp(r'<add>.*?</add>', dotAll: true);
+    final addMatch = addNameRegex.firstMatch(xfdf);
+    if (addMatch != null) {
+      final addSection = addMatch.group(0)!;
+      final nameRegex = RegExp(r'name="([^"]*)"');
+      final nameMatches = nameRegex.allMatches(addSection);
+      for (final match in nameMatches) {
+        final nameValue = match.group(1)!;
+        _createdAnnotationIds[nameValue] = nameValue;
+
+        print('\n[ADD] Annotation created with name:');
+        print('  Raw value: "$nameValue"');
+        print('  Length: ${nameValue.length}');
+        print('  Code units: ${nameValue.codeUnits}');
+        _printControlChars(nameValue, '  ');
+      }
+    }
+
+    // Extract IDs from <delete> section (<id>...</id> tags)
+    final deleteRegex = RegExp(r'<delete>.*?</delete>', dotAll: true);
+    final deleteMatch = deleteRegex.firstMatch(xfdf);
+    if (deleteMatch != null) {
+      final deleteSection = deleteMatch.group(0)!;
+      final idRegex = RegExp(r'<id>(.*?)</id>', dotAll: true);
+      final idMatches = idRegex.allMatches(deleteSection);
+      for (final match in idMatches) {
+        final idValue = match.group(1)!;
+
+        print('\n[DELETE] Annotation deleted with id:');
+        print('  Raw value: "$idValue"');
+        print('  Length: ${idValue.length}');
+        print('  Code units: ${idValue.codeUnits}');
+        _printControlChars(idValue, '  ');
+
+        // Check if this ID matches any created annotation
+        print('\n[COMPARISON] Checking against ${_createdAnnotationIds.length} known IDs:');
+
+        bool exactMatch = _createdAnnotationIds.containsKey(idValue);
+        print('  Exact string match: $exactMatch');
+
+        if (!exactMatch) {
+          print('  ⚠️  BUG DETECTED: The delete ID does NOT match the add name!');
+          print('  This means the backend cannot correlate the delete with the create.');
+          print('');
+
+          // Try to find a "close" match by normalizing
+          for (final createdId in _createdAnnotationIds.keys) {
+            final normalizedCreated = _normalizeForComparison(createdId);
+            final normalizedDeleted = _normalizeForComparison(idValue);
+            if (normalizedCreated == normalizedDeleted) {
+              print('  Found normalized match with created ID:');
+              print('    Created (raw): "${createdId}"');
+              print('    Deleted (raw): "${idValue}"');
+              print('    Created code units: ${createdId.codeUnits}');
+              print('    Deleted code units: ${idValue.codeUnits}');
+              print('');
+              print('  DIFFERENCE ANALYSIS:');
+              _showDifferences(createdId, idValue);
+              break;
+            }
+          }
+        } else {
+          print('  ✓ IDs match correctly.');
+        }
+      }
+    }
+
+    print('\n${'=' * 60}\n');
+  }
+
+  /// Prints control characters found in a string.
+  void _printControlChars(String value, String indent) {
+    final controlChars = <String>[];
+    for (int i = 0; i < value.length; i++) {
+      final code = value.codeUnitAt(i);
+      if (code < 32) {
+        controlChars.add('pos $i: char $code (0x${code.toRadixString(16)}) = ${_charName(code)}');
+      }
+    }
+    // Check for XML entities
+    final entityRegex = RegExp(r'&#(\d+);');
+    final entities = entityRegex.allMatches(value);
+    for (final match in entities) {
+      controlChars.add('XML entity: &#${match.group(1)}; (represents char ${match.group(1)})');
+    }
+    if (controlChars.isEmpty) {
+      print('${indent}Control chars: none');
+    } else {
+      print('${indent}Control chars/entities found:');
+      for (final c in controlChars) {
+        print('$indent  - $c');
+      }
+    }
+  }
+
+  /// Shows character-by-character differences between two strings.
+  void _showDifferences(String a, String b) {
+    final maxLen = a.length > b.length ? a.length : b.length;
+    for (int i = 0; i < maxLen; i++) {
+      final charA = i < a.length ? a[i] : '<missing>';
+      final charB = i < b.length ? b[i] : '<missing>';
+      if (charA != charB) {
+        final codeA = i < a.length ? a.codeUnitAt(i) : -1;
+        final codeB = i < b.length ? b.codeUnitAt(i) : -1;
+        print('    pos $i: ADD has "${charA}" (code $codeA) vs DELETE has "${charB}" (code $codeB)');
+      }
+    }
+    if (a.length != b.length) {
+      print('    Length difference: ADD=${a.length} vs DELETE=${b.length}');
+      print('    (XML entities like &#13; expand "\\r" from 1 char to 5 chars)');
+    }
+  }
+
+  /// Normalizes a string for comparison by decoding XML entities
+  /// and removing control characters.
+  String _normalizeForComparison(String value) {
+    var normalized = value.replaceAllMapped(
+      RegExp(r'&#(\d+);'),
+      (m) => String.fromCharCode(int.parse(m.group(1)!)),
     );
+    normalized = normalized.replaceAll(RegExp(r'[\x00-\x20]'), '');
+    return normalized;
+  }
+
+  /// Returns a human-readable name for a control character.
+  String _charName(int code) {
+    switch (code) {
+      case 0: return 'NULL';
+      case 9: return 'TAB';
+      case 10: return 'LF (\\n)';
+      case 13: return 'CR (\\r)';
+      default: return 'CTRL-${code}';
+    }
   }
 }
